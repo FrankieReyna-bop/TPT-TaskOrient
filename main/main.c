@@ -11,6 +11,9 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "i2c_lcd.h"
+
+#define LCDADDR 0x27
 
 #define I2C_MASTER_SCL_IO 20
 #define I2C_MASTER_SDA_IO 21
@@ -26,14 +29,11 @@
 
 #define BUFFER_SIZE 1024
 
-SemaphoreHandle_t i2cMutex;
-
 double gain_factor;
-//double system_phase;
 double gain_factor_range[CALIBRATION_NUM_INCR];
 double system_phase_range[CALIBRATION_NUM_INCR];
-// int16_t real[NUM_INCR];
-// int16_t imag[NUM_INCR];
+
+SemaphoreHandle_t i2cMutex;
 
 i2c_master_bus_config_t i2c_master_config = {
     .clk_source = I2C_CLK_SRC_DEFAULT,
@@ -43,6 +43,9 @@ i2c_master_bus_config_t i2c_master_config = {
     .glitch_ignore_cnt = 7,
     .flags.enable_internal_pullup = true,
 };
+i2c_master_bus_handle_t bus_handle;
+
+QueueSetHandle_t QueueHandle;
 
 void HandleSerialInput();
 
@@ -75,16 +78,7 @@ void print_double_arr(double* arr, int n) {
 
 //Plan, split code up into calibration, and then put main task as thingy. For now we just make it a task.
 
-void bioImpTask(void *arg){
-    printf("starting up\n");
-
-    i2cMutex = xSemaphoreCreateMutex();
-
-    // init master bus
-    i2c_master_bus_handle_t bus_handle;
-
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_master_config, &bus_handle));
-
+void bio_imp_init(void){
     // init AD5933
     AD5933_init_i2c_device(bus_handle);
 
@@ -113,6 +107,9 @@ void bioImpTask(void *arg){
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     AD5933_init_settings(START_FREQ, INTERNAL_CLOCK_FREQ, FREQ_INCR, NUM_INCR, AD5933_RANGE_2000mVpp, AD5933_PGA_1, 25);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
+
+void bio_imp_task(void *arg){
 
     int16_t real_arr[NUM_INCR];
     int16_t imag_arr[NUM_INCR];
@@ -134,6 +131,7 @@ void bioImpTask(void *arg){
                     
                     ESP_LOGI("log", "Calculated phase: %f", phase);
                     ESP_LOGI("log", "System phase compensated real: %f, imag: %f", comp_real, comp_imag);
+                    //Add queue give here, make sure pass 2 values
                 }
                 ESP_LOGI("log",  "Pausing");
                 xSemaphoreGive(i2cMutex);
@@ -143,8 +141,47 @@ void bioImpTask(void *arg){
     }
 }
 
+void lcd_task(void *args){
+    uint32_t impVal;
+    int lcd = (uint32_t)args;
+    char str[20];
+    if(xQueueReceive(QueueHandle, &impVal, portMAX_DELAY) == pdPASS){
+        snprintf(str, sizeof(str), "Imp: %ld", impVal);
+        if(xSemaphoreTake(i2cMutex, portMAX_DELAY) == pdTRUE) {
+            lcd_disp(str1, str2, lcd);
+            xSemaphoreGive(i2cMutex);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+}
+
+static void lcd_disp(char *str1, char *str2, uint8_t lcd) {
+    lcd_clear(lcd);
+    lcd_put_cursor(lcd, 0, 0);
+    lcd_send_string(lcd, str1);
+    lcd_put_cursor(lcd, 1, 0);
+    lcd_send_string(lcd, str2)
+}
+
 
 void app_main(void)
 {
-    xTaskCreatePinnedToCore(bioImpTask, "bioImpTask", 4096, NULL, 2, NULL, tskNO_AFFINITY);
+    printf("starting up\n");
+
+    // init master bus & Mutex
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_master_config, &bus_handle));
+
+    // Initialize size and datasize of queue
+    QueueHandle = xQueueCreate(15, sizeof(uint32_t));
+    if (QueueHandle == NULL) {
+        printf("Queue Creation Failed\n");
+        return;
+    }
+
+    i2cMutex = xSemaphoreCreateMutex();
+
+    bio_imp_init();
+
+    xTaskCreatePinnedToCore(bio_imp_task, "bio_imp_task", 4096, NULL, 2, NULL, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(lcd_task, "lcd_task", 4096, (void*)LCDADDR, 3, NULL, tskNO_AFFINITY);
 }
