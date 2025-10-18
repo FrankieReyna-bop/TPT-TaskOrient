@@ -2,14 +2,14 @@
 #define I2C_LCD_H
 #include "i2c_lcd.h"
 #include "esp_log.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "unistd.h"
 
 // GPIO number used for I2C master clock
-#define I2C_MASTER_SCL_IO           GPIO_NUM_3
+#define I2C_MASTER_SCL_IO           GPIO_NUM_20
 
 // GPIO number used for I2C master data
-#define I2C_MASTER_SDA_IO           GPIO_NUM_5
+#define I2C_MASTER_SDA_IO           GPIO_NUM_21
 
 // I2C master port number (number of I2C peripheral interfaces available depends on the chip)
 #define I2C_MASTER_NUM              0                
@@ -46,14 +46,16 @@
  *   Originally included in lcd_init(), this fcn sets up the i2c Master
  *   parameters so we can abstract it for multiple devices.
  */
-esp_err_t i2c_master_init(void);
+esp_err_t i2c_master_init(uint8_t lcd_addr);
 
 /**
  * @brief Initializes the LCD
  * 
  * This function sets up the LCD for use, initializing the required configurations.
  */
-void lcd_init(uint8_t lcd_addr);   
+void lcd_init(); 
+
+esp_err_t add_lcd_device(i2c_master_bus_handle_t existing_i2c_bus, uint8_t lcd_addr);
 
 /**
  * @brief Sends a command to the LCD
@@ -64,7 +66,7 @@ void lcd_init(uint8_t lcd_addr);
  * 
  * This function sends a command to the LCD to perform various control operations.
  */
-void lcd_send_cmd(uint8_t lcd_addr, char cmd);  
+void lcd_send_cmd(char cmd);  
 
 /**
  * @brief Sends data to the LCD
@@ -76,7 +78,7 @@ void lcd_send_cmd(uint8_t lcd_addr, char cmd);
  * 
  * This function sends a data byte to the LCD, which is displayed on the screen.
  */
-void lcd_send_data(uint8_t lcd_addr, char data);  
+void lcd_send_data(char data);  
 
 /**
  * @brief Sends a string to the LCD
@@ -85,7 +87,7 @@ void lcd_send_data(uint8_t lcd_addr, char data);
  * 
  * This function sends a null-terminated string to the LCD to be displayed.
  */
-void lcd_send_string(uint8_t lcd_addr, char *str);  
+void lcd_send_string(char *str);  
 
 /**
  * @brief Sets the cursor position on the LCD
@@ -96,13 +98,13 @@ void lcd_send_string(uint8_t lcd_addr, char *str);
  * 
  * This function positions the cursor on the LCD at the specified row and column.
  */
-void lcd_put_cursor(uint8_t lcd_addr, int row, int col); 
+void lcd_put_cursor(int row, int col); 
 
 /**
  * @brief Clears the LCD screen
  * 
  * This function clears all the content displayed on the LCD and resets the cursor position.
  */
-void lcd_clear(uint8_t lcd_addr);
+void lcd_clear();
 
 #endif /* I2C_LCD_H */

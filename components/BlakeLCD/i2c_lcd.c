@@ -1,64 +1,67 @@
 #include "i2c_lcd.h"
 #include "esp_log.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "unistd.h"
 
+static const char *TAG = "LCD";
+static i2c_master_bus_handle_t i2c_bus = NULL;
+static i2c_master_dev_handle_t lcd_dev = NULL;
 
-/*
- *   Modification (BH Jul25):
- *       Abstracting out i2c initialization so that it
- *       can be used by multiple devices on same i2c bus
- *
- */
+i2c_master_bus_config_t bus_conf = {
+    .i2c_port = I2C_NUM_0,
+    .sda_io_num = GPIO_NUM_21,
+    .scl_io_num = GPIO_NUM_22,
+    .clk_source = I2C_CLK_SRC_DEFAULT,
+};
 
-esp_err_t err; // Variable to store I2C communication errors
-static const char *TAG = "LCD"; // Tag for logging
-
-static int i2cMasterinit = 0;  // flag to show i2c is setup
-
-// I2C master initialization
-esp_err_t i2c_master_init(void)
+esp_err_t i2c_master_init(uint8_t lcd_addr)
 {
-    int i2c_master_port = I2C_MASTER_NUM;
+    if (i2c_bus) return ESP_OK; // already initialized
 
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER, // Set as I2C master mode
-        .sda_io_num = I2C_MASTER_SDA_IO, // GPIO number for I2C SDA
-        .scl_io_num = I2C_MASTER_SCL_IO, // GPIO number for I2C SCL
-        .sda_pullup_en = GPIO_PULLUP_ENABLE, // Enable pull-up on SDA line
-        .scl_pullup_en = GPIO_PULLUP_ENABLE, // Enable pull-up on SCL line
-        .master.clk_speed = I2C_MASTER_FREQ_HZ, // Set I2C clock frequency
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_conf, &i2c_bus));
+
+    // Add LCD as device on this bus
+    i2c_device_config_t dev_conf = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = lcd_addr,
+        .scl_speed_hz = 100000,
     };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &dev_conf, &lcd_dev));
 
-    // Configure I2C parameters with the given configuration
-    i2c_param_config(i2c_master_port, &conf);
-
-    i2cMasterinit = 1;  // we are set up
-    // Install the I2C driver with the specified parameters
-    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
+    ESP_LOGI(TAG, "I2C bus + LCD device initialized (addr=0x%02x)", lcd_addr);
+    return ESP_OK;
 }
 
-void lcd_send_cmd(uint8_t lcd_addr, char cmd)
+esp_err_t add_lcd_device(i2c_master_bus_handle_t existing_i2c_bus, uint8_t lcd_addr){
+    i2c_device_config_t dev_conf = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = lcd_addr,
+        .scl_speed_hz = 100000,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(existing_i2c_bus, &dev_conf, &lcd_dev));
+    return ESP_OK;
+}
+
+static esp_err_t lcd_write(uint8_t *data, size_t len)
 {
-    char data_u, data_l;
-    uint8_t data_t[4];
-    
-    data_u = (cmd & 0xf0); // Upper nibble of the command
-    data_l = ((cmd << 4) & 0xf0); // Lower nibble of the command
-    
-    data_t[0] = data_u | 0x0C; // Enable (EN) = 1, Register Select (RS) = 0
-    data_t[1] = data_u | 0x08; // Enable (EN) = 0, Register Select (RS) = 0
-    data_t[2] = data_l | 0x0C; // Enable (EN) = 1, Register Select (RS) = 0
-    data_t[3] = data_l | 0x08; // Enable (EN) = 0, Register Select (RS) = 0
-    
-    // Write data to the I2C device
-    err = i2c_master_write_to_device(I2C_NUM, lcd_addr, data_t, 4, 1000);
-    
-    // Log an error message if there is an error in sending the command
-    if (err != 0) ESP_LOGI(TAG, "Error in sending command");
+    return i2c_master_transmit(lcd_dev, data, len, 1000);
 }
 
-void lcd_send_data(uint8_t lcd_addr, char data)
+void lcd_send_cmd(char cmd)
+{
+    uint8_t data_t[4];
+    uint8_t data_u = (cmd & 0xf0);
+    uint8_t data_l = ((cmd << 4) & 0xf0);
+
+    data_t[0] = data_u | 0x0C;
+    data_t[1] = data_u | 0x08;
+    data_t[2] = data_l | 0x0C;
+    data_t[3] = data_l | 0x08;
+
+    if (lcd_write(data_t, 4) != ESP_OK)
+        ESP_LOGE(TAG, "Error sending command");
+}
+void lcd_send_data(char data)
 {
     char data_u, data_l;
     uint8_t data_t[4];
@@ -72,19 +75,17 @@ void lcd_send_data(uint8_t lcd_addr, char data)
     data_t[3] = data_l | 0x09; // Enable (EN) = 0, Register Select (RS) = 1
     
     // Write data to the I2C device
-    err = i2c_master_write_to_device(I2C_NUM, lcd_addr, data_t, 4, 1000);
-    
-    // Log an error message if there is an error in sending the data
-    if (err != 0) ESP_LOGI(TAG, "Error in sending data");
+    if (lcd_write(data_t, 4) != ESP_OK)
+        ESP_LOGE(TAG, "Error Sending Data");
 }
 
-void lcd_clear(uint8_t lcd_addr)
+void lcd_clear(void)
 {
-    lcd_send_cmd(lcd_addr, LCD_CMD_CLEAR_DISPLAY); // Clear display command
+    lcd_send_cmd(LCD_CMD_CLEAR_DISPLAY); // Clear display command
     usleep(5000); // Wait for the command to execute
 }
 
-void lcd_put_cursor(uint8_t lcd_addr, int row, int col)
+void lcd_put_cursor(int row, int col)
 {
     switch (row)
     {
@@ -96,43 +97,38 @@ void lcd_put_cursor(uint8_t lcd_addr, int row, int col)
             break;
     }
 
-    lcd_send_cmd(lcd_addr, col); // Send command to set cursor position
+    lcd_send_cmd(col); // Send command to set cursor position
 }
 
-void lcd_init(uint8_t lcd_addr)
+void lcd_init(void)
 {
     // NEW:   i2c must be initialized first
     //    i2c_master_init(); // Initialize I2C master interface
-    if (! i2cMasterinit) {
-        ESP_LOGI(TAG, " i2c master is not set up before lcd_init() call.");
-        return;
-        }
-
     // 4-bit initialization sequence
     usleep(50000); // Wait for >40ms
-    lcd_send_cmd(lcd_addr, LCD_CMD_INIT_8_BIT_MODE);
+    lcd_send_cmd(LCD_CMD_INIT_8_BIT_MODE);
     usleep(5000);  // Wait for >4.1ms
-    lcd_send_cmd(lcd_addr, LCD_CMD_INIT_8_BIT_MODE);
+    lcd_send_cmd(LCD_CMD_INIT_8_BIT_MODE);
     usleep(200);  // Wait for >100us
-    lcd_send_cmd(lcd_addr, LCD_CMD_INIT_8_BIT_MODE);
+    lcd_send_cmd(LCD_CMD_INIT_8_BIT_MODE);
     usleep(10000);
-    lcd_send_cmd(lcd_addr, LCD_CMD_INIT_4_BIT_MODE);  // Set 4-bit mode
+    lcd_send_cmd(LCD_CMD_INIT_4_BIT_MODE);  // Set 4-bit mode
     usleep(10000);
 
     // Display initialization
-    lcd_send_cmd(lcd_addr, LCD_CMD_FUNCTION_SET); // Function set: 4-bit mode, 2-line display, 5x8 characters
+    lcd_send_cmd(LCD_CMD_FUNCTION_SET); // Function set: 4-bit mode, 2-line display, 5x8 characters
     usleep(1000);
-    lcd_send_cmd(lcd_addr, LCD_CMD_DISPLAY_OFF); // Display off
+    lcd_send_cmd(LCD_CMD_DISPLAY_OFF); // Display off
     usleep(1000);
-    lcd_send_cmd(lcd_addr, LCD_CMD_CLEAR_DISPLAY);  // Clear display
+    lcd_send_cmd(LCD_CMD_CLEAR_DISPLAY);  // Clear display
     usleep(1000);
-    lcd_send_cmd(lcd_addr, LCD_CMD_ENTRY_MODE_SET); // Entry mode set: increment cursor, no shift
+    lcd_send_cmd(LCD_CMD_ENTRY_MODE_SET); // Entry mode set: increment cursor, no shift
     usleep(1000);
-    lcd_send_cmd(lcd_addr, LCD_CMD_DISPLAY_ON); // Display on, cursor off, blink off
+    lcd_send_cmd(LCD_CMD_DISPLAY_ON); // Display on, cursor off, blink off
     usleep(1000);
 }
 
-void lcd_send_string(uint8_t lcd_addr, char *str)
+void lcd_send_string(char *str)
 {
-    while (*str) lcd_send_data(lcd_addr, *str++); // Send each character of the string
+    while (*str) lcd_send_data(*str++); // Send each character of the string
 }

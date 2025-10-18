@@ -13,10 +13,11 @@
 #include "esp_mac.h"
 #include "i2c_lcd.h"
 
-#define LCDADDR 0x27
 
-#define I2C_MASTER_SCL_IO 20
-#define I2C_MASTER_SDA_IO 21
+#define LCDADDR 0x3F
+
+#define I2C_MASTER_SCL_IO GPIO_NUM_20
+#define I2C_MASTER_SDA_IO GPIO_NUM_21
 
 #define MHz_6 6000000
 #define INTERNAL_CLOCK_FREQ 16000000
@@ -128,10 +129,9 @@ void bio_imp_task(void *arg){
                     double phase = arctan_phase_angle(real_arr[i], imag_arr[i], &phase_error);
                     double comp_real, comp_imag;
                     compensated_real_and_imag(impedance, phase, system_phase_range[i], &comp_real, &comp_imag);
-                    
                     ESP_LOGI("log", "Calculated phase: %f", phase);
                     ESP_LOGI("log", "System phase compensated real: %f, imag: %f", comp_real, comp_imag);
-                    //Add queue give here, make sure pass 2 values
+                    xQueueSend(QueueHandle, (void *) &impedance, (TickType_t)0);
                 }
                 ESP_LOGI("log",  "Pausing");
                 xSemaphoreGive(i2cMutex);
@@ -141,28 +141,30 @@ void bio_imp_task(void *arg){
     }
 }
 
+void lcd_disp(char *str1, uint8_t lcd) {
+    lcd_clear(lcd);
+    lcd_put_cursor(0, 0);
+    lcd_send_string(str1);
+}
+
+
 void lcd_task(void *args){
-    uint32_t impVal;
+    double impVal;
     int lcd = (uint32_t)args;
     char str[20];
-    if(xQueueReceive(QueueHandle, &impVal, portMAX_DELAY) == pdPASS){
-        snprintf(str, sizeof(str), "Imp: %ld", impVal);
-        if(xSemaphoreTake(i2cMutex, portMAX_DELAY) == pdTRUE) {
-            lcd_disp(str1, str2, lcd);
-            xSemaphoreGive(i2cMutex);
-            vTaskDelay(pdMS_TO_TICKS(100));
+    printf("created string");
+    while(1) {
+        if(xQueueReceive(QueueHandle, &impVal, portMAX_DELAY) == pdPASS){
+            snprintf(str, sizeof(str), "Imp: %f", impVal);
+            printf("got impval");
+            if(xSemaphoreTake(i2cMutex, portMAX_DELAY) == pdTRUE) {
+                lcd_disp(str, lcd);
+                xSemaphoreGive(i2cMutex);
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
         }
     }
 }
-
-static void lcd_disp(char *str1, char *str2, uint8_t lcd) {
-    lcd_clear(lcd);
-    lcd_put_cursor(lcd, 0, 0);
-    lcd_send_string(lcd, str1);
-    lcd_put_cursor(lcd, 1, 0);
-    lcd_send_string(lcd, str2)
-}
-
 
 void app_main(void)
 {
@@ -172,7 +174,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_master_config, &bus_handle));
 
     // Initialize size and datasize of queue
-    QueueHandle = xQueueCreate(15, sizeof(uint32_t));
+    QueueHandle = xQueueCreate(15, sizeof(double));
     if (QueueHandle == NULL) {
         printf("Queue Creation Failed\n");
         return;
@@ -181,6 +183,8 @@ void app_main(void)
     i2cMutex = xSemaphoreCreateMutex();
 
     bio_imp_init();
+    add_lcd_device(bus_handle, LCDADDR);
+    lcd_init();
 
     xTaskCreatePinnedToCore(bio_imp_task, "bio_imp_task", 4096, NULL, 2, NULL, tskNO_AFFINITY);
     xTaskCreatePinnedToCore(lcd_task, "lcd_task", 4096, (void*)LCDADDR, 3, NULL, tskNO_AFFINITY);
